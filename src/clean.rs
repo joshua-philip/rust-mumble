@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub async fn handle_server_tick(state: ServerStateRef) {
+    let mut tick_counter = 0;
+    
     loop {
         tracing::trace!("Running client clean loop");
 
@@ -13,6 +15,13 @@ pub async fn handle_server_tick(state: ServerStateRef) {
             Err(e) => {
                 tracing::error!("error in clean loop: {}", e);
             }
+        }
+
+        // Log channel statistics every 30 seconds
+        tick_counter += 1;
+        if tick_counter >= 30 {
+            state.log_channel_statistics();
+            tick_counter = 0;
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

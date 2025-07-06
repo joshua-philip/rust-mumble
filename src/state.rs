@@ -71,6 +71,7 @@ pub struct ServerState {
     // pub logs: HashCache<SocketAddr, ()>,
     session_count: AtomicU32,
     channel_count: AtomicU32,
+    free_channel_ids: Arc<std::sync::Mutex<Vec<u32>>>,
 }
 
 impl ServerState {
@@ -92,6 +93,7 @@ impl ServerState {
             socket,
             session_count: AtomicU32::new(1),
             channel_count: AtomicU32::new(1),
+            free_channel_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -140,7 +142,11 @@ impl ServerState {
             state.get_temporary(),
         );
 
-        tracing::debug!("Created channel {} with name {}", channel_id, state.get_name().to_string());
+        tracing::info!("Created channel {} with name {} (active channels: {})", 
+            channel_id, 
+            state.get_name().to_string(),
+            self.channels.len()
+        );
 
         // this should already be checked prior to us creating the channel
         let _ = self.channels.insert(channel_id, Arc::clone(&channel));
@@ -205,6 +211,14 @@ impl ServerState {
                 if !channel.temporary || !channel.get_clients().is_empty() {
                     return None;
                 };
+            }
+        }
+
+        // Return the channel ID to the free pool before removing it
+        if leave_channel_id > 0 { // Don't recycle root channel (0)
+            if let Ok(mut free_ids) = self.free_channel_ids.lock() {
+                free_ids.push(leave_channel_id);
+                tracing::debug!("Returned channel {} to free pool (pool size: {})", leave_channel_id, free_ids.len());
             }
         }
 
@@ -433,14 +447,48 @@ impl ServerState {
 
     /// Gets a free channel id for a channel to use
     ///
-    /// This can loop whenever (in the unlikely case) the server session ids have overflowed
+    /// This will first try to reuse a previously freed channel ID, then fall back to creating new ones
     fn get_free_channel_id(&self) -> u32 {
+        // First, try to reuse a freed channel ID
+        if let Ok(mut free_ids) = self.free_channel_ids.lock() {
+            if let Some(reused_id) = free_ids.pop() {
+                tracing::debug!("Reusing channel ID {} (pool size: {})", reused_id, free_ids.len());
+                return reused_id;
+            }
+        }
+
+        // Fall back to creating a new channel ID
         let mut channel_id = self.channel_count.fetch_add(1, Ordering::SeqCst);
 
-        while self.channels.contains(&channel_id) {
+        // Prevent infinite loops by capping at reasonable limit
+        let max_attempts = 1000;
+        let mut attempts = 0;
+        
+        while self.channels.contains(&channel_id) && attempts < max_attempts {
             channel_id = self.channel_count.fetch_add(1, Ordering::SeqCst);
+            attempts += 1;
+        }
+
+        if attempts >= max_attempts {
+            tracing::error!("Failed to find free channel ID after {} attempts, using {}", max_attempts, channel_id);
+        } else {
+            tracing::debug!("Created new channel ID {} (attempt {})", channel_id, attempts + 1);
         }
 
         channel_id
+    }
+
+    pub fn log_channel_statistics(&self) {
+        let active_channels = self.channels.len();
+        let free_pool_size = self.free_channel_ids.lock().map(|pool| pool.len()).unwrap_or(0);
+        let current_counter = self.channel_count.load(Ordering::Relaxed);
+        
+        tracing::info!(
+            "Channel Stats - Active: {}, Free Pool: {}, Counter: {}, Total Created: {}", 
+            active_channels, 
+            free_pool_size, 
+            current_counter,
+            current_counter + free_pool_size
+        );
     }
 }
