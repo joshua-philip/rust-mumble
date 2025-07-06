@@ -488,7 +488,7 @@ impl ServerState {
             active_channels, 
             free_pool_size, 
             current_counter,
-            current_counter + free_pool_size
+            current_counter + free_pool_size as u32
         );
     }
 }
